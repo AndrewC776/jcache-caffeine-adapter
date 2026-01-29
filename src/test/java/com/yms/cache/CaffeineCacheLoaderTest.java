@@ -13,6 +13,7 @@ import javax.cache.expiry.EternalExpiryPolicy;
 import javax.cache.integration.CacheLoader;
 import javax.cache.integration.CacheLoaderException;
 import java.util.*;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.*;
@@ -324,6 +325,184 @@ class CaffeineCacheLoaderTest {
         String result = cache.invoke("key1", (entry, args) -> entry.getValue());
 
         assertNull(result);
+    }
+
+    // ========== loadAll API Tests ==========
+
+    @Test
+    void loadAllShouldLoadMissingKeys() throws Exception {
+        AtomicInteger loadCount = new AtomicInteger(0);
+        CaffeineCache<String, String> cache = createCacheWithLoader(key -> {
+            loadCount.incrementAndGet();
+            return "loaded-" + key;
+        });
+
+        java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+        final boolean[] success = {false};
+        final Exception[] error = {null};
+
+        cache.loadAll(Set.of("key1", "key2"), false, new javax.cache.integration.CompletionListener() {
+            @Override
+            public void onCompletion() {
+                success[0] = true;
+                latch.countDown();
+            }
+            @Override
+            public void onException(Exception e) {
+                error[0] = e;
+                latch.countDown();
+            }
+        });
+
+        assertTrue(latch.await(5, TimeUnit.SECONDS));
+        assertTrue(success[0]);
+        assertNull(error[0]);
+        assertEquals(2, loadCount.get());
+        assertEquals("loaded-key1", cache.get("key1"));
+        assertEquals("loaded-key2", cache.get("key2"));
+    }
+
+    @Test
+    void loadAllShouldNotReplaceExistingWhenReplaceIsFalse() throws Exception {
+        AtomicInteger loadCount = new AtomicInteger(0);
+        CaffeineCache<String, String> cache = createCacheWithLoader(key -> {
+            loadCount.incrementAndGet();
+            return "loaded-" + key;
+        });
+
+        cache.put("key1", "existingValue");
+
+        java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+        cache.loadAll(Set.of("key1", "key2"), false, new javax.cache.integration.CompletionListener() {
+            @Override
+            public void onCompletion() { latch.countDown(); }
+            @Override
+            public void onException(Exception e) { latch.countDown(); }
+        });
+
+        assertTrue(latch.await(5, TimeUnit.SECONDS));
+        assertEquals(1, loadCount.get()); // Only key2 loaded
+        assertEquals("existingValue", cache.get("key1")); // Unchanged
+        assertEquals("loaded-key2", cache.get("key2")); // Newly loaded
+    }
+
+    @Test
+    void loadAllShouldReplaceExistingWhenReplaceIsTrue() throws Exception {
+        AtomicInteger loadCount = new AtomicInteger(0);
+        CaffeineCache<String, String> cache = createCacheWithLoader(key -> {
+            loadCount.incrementAndGet();
+            return "loaded-" + key;
+        });
+
+        cache.put("key1", "existingValue");
+
+        java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+        cache.loadAll(Set.of("key1", "key2"), true, new javax.cache.integration.CompletionListener() {
+            @Override
+            public void onCompletion() { latch.countDown(); }
+            @Override
+            public void onException(Exception e) { latch.countDown(); }
+        });
+
+        assertTrue(latch.await(5, TimeUnit.SECONDS));
+        assertEquals(2, loadCount.get()); // Both keys loaded
+        assertEquals("loaded-key1", cache.get("key1")); // Replaced
+        assertEquals("loaded-key2", cache.get("key2"));
+    }
+
+    @Test
+    void loadAllShouldCallOnExceptionWhenLoaderFails() throws Exception {
+        CaffeineCache<String, String> cache = createCacheWithLoader(key -> {
+            throw new RuntimeException("Simulated load failure");
+        });
+
+        java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+        final Exception[] caughtException = {null};
+
+        cache.loadAll(Set.of("key1"), false, new javax.cache.integration.CompletionListener() {
+            @Override
+            public void onCompletion() { latch.countDown(); }
+            @Override
+            public void onException(Exception e) {
+                caughtException[0] = e;
+                latch.countDown();
+            }
+        });
+
+        assertTrue(latch.await(5, TimeUnit.SECONDS));
+        assertNotNull(caughtException[0]);
+    }
+
+    @Test
+    void loadAllShouldWorkWithNullListener() throws Exception {
+        AtomicInteger loadCount = new AtomicInteger(0);
+        CaffeineCache<String, String> cache = createCacheWithLoader(key -> {
+            loadCount.incrementAndGet();
+            return "loaded-" + key;
+        });
+
+        // Should not throw with null listener
+        cache.loadAll(Set.of("key1"), false, null);
+
+        // Give async operation time to complete
+        Thread.sleep(100);
+
+        assertEquals("loaded-key1", cache.get("key1"));
+    }
+
+    @Test
+    void loadAllShouldThrowForNullKeys() {
+        CaffeineCache<String, String> cache = createCacheWithLoader(key -> "loaded-" + key);
+
+        assertThrows(NullPointerException.class, () ->
+            cache.loadAll(null, false, null));
+    }
+
+    @Test
+    void loadAllShouldThrowWhenCacheIsClosed() {
+        CaffeineCache<String, String> cache = createCacheWithLoader(key -> "loaded-" + key);
+        cache.close();
+
+        assertThrows(IllegalStateException.class, () ->
+            cache.loadAll(Set.of("key1"), false, null));
+    }
+
+    @Test
+    void loadAllShouldFireCreatedEventsForNewEntries() throws Exception {
+        CaffeineCache<String, String> cache = createCacheWithLoader(key -> "loaded-" + key);
+
+        List<CacheEntryEvent<? extends String, ? extends String>> events =
+            Collections.synchronizedList(new ArrayList<>());
+        registerCreatedListener(cache, events);
+
+        java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+        cache.loadAll(Set.of("key1", "key2"), false, new javax.cache.integration.CompletionListener() {
+            @Override
+            public void onCompletion() { latch.countDown(); }
+            @Override
+            public void onException(Exception e) { latch.countDown(); }
+        });
+
+        assertTrue(latch.await(5, TimeUnit.SECONDS));
+
+        assertEquals(2, events.size());
+    }
+
+    @Test
+    void loadAllShouldRecordPutStatistics() throws Exception {
+        CaffeineCache<String, String> cache = createCacheWithLoader(key -> "loaded-" + key);
+
+        java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+        cache.loadAll(Set.of("key1", "key2"), false, new javax.cache.integration.CompletionListener() {
+            @Override
+            public void onCompletion() { latch.countDown(); }
+            @Override
+            public void onException(Exception e) { latch.countDown(); }
+        });
+
+        assertTrue(latch.await(5, TimeUnit.SECONDS));
+
+        assertEquals(2, cache.getStatistics().getCachePuts());
     }
 
     // ========== No Loader Configured Tests ==========

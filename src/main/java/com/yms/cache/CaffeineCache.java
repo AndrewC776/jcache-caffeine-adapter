@@ -465,7 +465,124 @@ public class CaffeineCache<K, V> implements Cache<K, V> {
                        CompletionListener completionListener) {
         ensureOpen();
         checkReentrant();
-        // TODO: Implement with CacheLoader
+        if (keys == null) {
+            throw new NullPointerException("keys cannot be null");
+        }
+
+        // If no loader configured, complete immediately
+        if (cacheLoader == null) {
+            if (completionListener != null) {
+                completionListener.onCompletion();
+            }
+            return;
+        }
+
+        // Execute asynchronously
+        Thread loadThread = new Thread(() -> {
+            try {
+                // Determine which keys to load
+                Set<K> keysToLoad = new HashSet<>();
+                for (K key : keys) {
+                    if (key == null) {
+                        throw new NullPointerException("key cannot be null");
+                    }
+                    if (replaceExistingValues || !containsKeyInternal(key)) {
+                        keysToLoad.add(key);
+                    }
+                }
+
+                if (keysToLoad.isEmpty()) {
+                    if (completionListener != null) {
+                        completionListener.onCompletion();
+                    }
+                    return;
+                }
+
+                // Load all keys
+                Map<K, V> loadedValues;
+                try {
+                    loadedValues = cacheLoader.loadAll(keysToLoad);
+                } catch (Exception e) {
+                    if (completionListener != null) {
+                        completionListener.onException(e);
+                    }
+                    return;
+                }
+
+                // Cache loaded values
+                if (loadedValues != null) {
+                    for (Map.Entry<K, V> entry : loadedValues.entrySet()) {
+                        K key = entry.getKey();
+                        V value = entry.getValue();
+                        if (key != null && value != null) {
+                            putLoadedValue(key, value);
+                        }
+                    }
+                }
+
+                if (completionListener != null) {
+                    completionListener.onCompletion();
+                }
+            } catch (Exception e) {
+                if (completionListener != null) {
+                    completionListener.onException(e);
+                }
+            }
+        });
+        loadThread.setDaemon(true);
+        loadThread.start();
+    }
+
+    /**
+     * Internal containsKey check that doesn't trigger reentrant detection.
+     * Used by loadAll to check existing keys.
+     */
+    private boolean containsKeyInternal(K key) {
+        Expirable<V> existing = storeMap.get(key);
+        return existing != null && !existing.isExpired();
+    }
+
+    /**
+     * Puts a value loaded by loadAll into the cache with proper events and statistics.
+     */
+    private void putLoadedValue(K key, V value) {
+        K keyCopy = keyCopier.copy(key);
+        V valueCopy = valueCopier.copy(value);
+
+        // Side effect holders
+        final boolean[] wasCreated = {false};
+        final boolean[] wasUpdated = {false};
+        final V[] oldValue = (V[]) new Object[1];
+
+        storeMap.compute(keyCopy, (k, existing) -> {
+            long expiry = expiryCalculator.calculateCreationExpiry();
+
+            if (existing != null && !existing.isExpired()) {
+                // Update existing entry
+                wasUpdated[0] = true;
+                oldValue[0] = existing.getValue();
+                expiry = expiryCalculator.calculateUpdateExpiry(existing.getExpireTime());
+                if (!expiryCalculator.shouldUpdateExpiry(expiry)) {
+                    expiry = existing.getExpireTime();
+                }
+            } else {
+                // Create new entry
+                wasCreated[0] = true;
+            }
+
+            return new Expirable<>(valueCopy, expiry);
+        });
+
+        // Side effects outside compute
+        if (wasCreated[0]) {
+            eventDispatcher.dispatchCreated(keyCopy, valueCopy);
+        } else if (wasUpdated[0]) {
+            eventDispatcher.dispatchUpdated(keyCopy, valueCopier.copy(oldValue[0]), valueCopy);
+        }
+
+        if (statistics != null) {
+            statistics.recordPut();
+        }
     }
 
     @Override
@@ -1684,8 +1801,10 @@ public class CaffeineCache<K, V> implements Cache<K, V> {
 
     /**
      * Returns the statistics collector, or null if disabled.
+     *
+     * @return the statistics collector, or null if statistics are not enabled
      */
-    protected JCacheStatistics getStatistics() {
+    public JCacheStatistics getStatistics() {
         return statistics;
     }
 
