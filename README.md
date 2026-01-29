@@ -262,20 +262,92 @@ System.out.println("Evictions: " + stats.getCacheEvictions());
 
 ## Performance
 
-Benchmark results with 10,000 records on typical hardware:
+### Quick Results
 
-| Data Type | Write (ops/sec) | Read (ops/sec) |
-|-----------|-----------------|----------------|
-| Simple String | ~270,000 | ~960,000 |
-| Complex Object | ~11,000 | ~18,000 |
-| Large Text (1KB) | ~340,000 | ~560,000 |
+Benchmark results with JMH on typical hardware:
+
+| Operation | Throughput | Latency p50 | Latency p99 |
+|-----------|------------|-------------|-------------|
+| get (hit) | 13.3M ops/sec | 42 ns | 1.0 us |
+| put (update) | ~5M ops/sec | ~100 ns | ~2 us |
+| getAndPut | ~4M ops/sec | ~150 ns | ~3 us |
 
 Key observations:
 - Reads are 2-3x faster than writes
 - Simple types outperform complex objects due to serialization overhead
 - By-reference mode (`setStoreByValue(false)`) improves performance but requires immutable objects
 
-Run benchmarks:
+### JMH Benchmarking
+
+This project includes comprehensive JMH (Java Microbenchmark Harness) benchmarks for accurate performance measurement.
+
+**Build benchmark JAR:**
+```bash
+mvn clean package -Pbenchmark -DskipTests
+```
+
+**List available benchmarks:**
+```bash
+java -jar target/benchmarks.jar -l
+```
+
+**Run all benchmarks:**
+```bash
+java -jar target/benchmarks.jar
+```
+
+**Run specific benchmark:**
+```bash
+# Read operations only
+java -jar target/benchmarks.jar ".*ReadOperation.*"
+
+# Concurrency tests
+java -jar target/benchmarks.jar ".*Concurrency.*"
+
+# With custom parameters
+java -jar target/benchmarks.jar ".*ReadOperation.*" \
+  -p cacheSize=100000 \
+  -p storeByValue=true \
+  -p statisticsEnabled=false
+```
+
+**Run with profilers:**
+```bash
+# GC profiler
+java -jar target/benchmarks.jar -prof gc
+
+# Stack profiler
+java -jar target/benchmarks.jar -prof stack
+
+# Output JSON results
+java -jar target/benchmarks.jar -rf json -rff benchmark-results.json
+```
+
+### Benchmark Categories
+
+| Category | Benchmarks | Description |
+|----------|------------|-------------|
+| **Read Operations** | get, getAll, containsKey | Cache hit/miss performance |
+| **Write Operations** | put, putAll, putIfAbsent, remove | Write throughput |
+| **Atomic Operations** | getAndPut, replace, invoke | Atomic read-modify-write |
+| **Concurrency** | Mixed workload, hot key contention | Multi-threaded stress tests |
+| **Integration** | Read-through, write-through | CacheLoader/Writer overhead |
+| **Expiry** | CREATED, ACCESSED, MODIFIED | Expiration policy overhead |
+| **Memory** | Large objects, serialization | GC pressure and memory usage |
+
+### Parameterized Tests
+
+| Parameter | Values | Description |
+|-----------|--------|-------------|
+| `cacheSize` | 10000, 100000 | Maximum cache entries |
+| `dataSize` | 10000, 100000 | Test data size |
+| `valueSize` | 100, 1024 | Value size in bytes |
+| `storeByValue` | true, false | Serialization enabled |
+| `statisticsEnabled` | true, false | Statistics overhead |
+| `readRatio` | 0.8, 0.5, 0.2 | Read vs write ratio |
+| `backendLatencyUs` | 0, 100, 1000 | Simulated backend latency |
+
+Run simple example benchmarks:
 ```bash
 mvn exec:java -Dexec.mainClass="com.yms.cache.example.ComplexDataExample"
 ```
@@ -340,6 +412,24 @@ src/main/java/com/yms/cache/
 └── example/
     ├── CaffeineCacheExample.java    # Basic usage examples
     └── ComplexDataExample.java      # Complex data & benchmarks
+
+src/test/java/com/yms/cache/
+├── CaffeineCache*Test.java     # Unit tests (18 test classes)
+└── benchmark/                  # JMH performance benchmarks
+    ├── data/
+    │   ├── BenchmarkData.java      # Test data generators
+    │   └── ComplexObject.java      # Complex serializable objects
+    ├── state/
+    │   ├── CacheState.java         # Cache setup state
+    │   └── DataState.java          # Test data state
+    └── scenarios/
+        ├── ReadOperationBenchmarks.java   # get, getAll, containsKey
+        ├── WriteOperationBenchmarks.java  # put, putAll, remove
+        ├── AtomicOperationBenchmarks.java # getAndPut, replace, invoke
+        ├── ConcurrencyBenchmarks.java     # Multi-threaded stress tests
+        ├── IntegrationBenchmarks.java     # Read/write-through
+        ├── ExpiryBenchmarks.java          # Expiration policies
+        └── MemoryBenchmarks.java          # GC pressure tests
 ```
 
 ## Build & Test
@@ -354,6 +444,18 @@ mvn test jacoco:report
 # Run examples
 mvn exec:java -Dexec.mainClass="com.yms.cache.example.CaffeineCacheExample"
 mvn exec:java -Dexec.mainClass="com.yms.cache.example.ComplexDataExample"
+
+# Build JMH benchmark JAR
+mvn clean package -Pbenchmark -DskipTests
+
+# Run benchmarks
+java -jar target/benchmarks.jar
+
+# Quick smoke test (minimal iterations)
+java -jar target/benchmarks.jar ".*ReadOperation.*benchmarkGetSequential" \
+  -wi 1 -i 1 -f 1 \
+  -p cacheSize=10000 -p storeByValue=false -p statisticsEnabled=false \
+  -p dataSize=10000 -p valueSize=100
 ```
 
 ## Test Coverage
